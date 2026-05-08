@@ -1,0 +1,59 @@
+title: "CTF Vulnerability Hunter Skill"
+slug: "ctf-vuln-hunter-skill"
+type: feature
+status: review
+
+author: "arananet"
+created_at: "2026-05-08"
+updated_at: "2026-05-08"
+
+description: |
+  A Claude Code CLI skill and Python runner that autonomously scans a source file or
+  directory for security vulnerabilities. When invoked, it collects the source path,
+  output path, and log path from the user (with sensible defaults), builds and executes
+  the `claude --dangerously-skip-permissions` command with a structured prompt, reads
+  the resulting report, and surfaces it to the user. Errors (missing CLI, bad paths,
+  empty output, non-zero exit) are caught and surfaced with actionable messages.
+
+acceptance_criteria:
+  - "Given a valid source path, when the skill is invoked, then it asks for source/output/log paths with defaults and runs the claude CLI command."
+  - "Given the claude CLI produces a report at the output path, when the scan completes with exit 0, then the full report is read and displayed to the user."
+  - "Given the claude CLI is not installed, when the scan is attempted, then the user is told to install it via npm."
+  - "Given the output file is empty or missing after the scan, when checking results, then the last 20 lines of the log file are surfaced to the user."
+  - "Given a non-zero exit code from the claude CLI, when the scan ends, then the exit code and the last 20 log lines are shown."
+  - "Given a source path that does not exist, when the scan is attempted, then the user is prompted to confirm the path before running."
+
+test_plan:
+  - "Unit test: test_runner.py — mock subprocess.run; assert the correct claude CLI command is assembled with the right source/output/log paths."
+  - "Unit test: test_runner.py — when exit code is 0 and report file is non-empty, assert report content is returned."
+  - "Unit test: test_runner.py — when claude binary is missing (FileNotFoundError), assert InstallationError is raised with the npm install message."
+  - "Unit test: test_runner.py — when output file is empty after scan, assert the last 20 log lines are returned instead."
+  - "Unit test: test_runner.py — when exit code is non-zero, assert NonZeroExitError is raised with the last 20 log lines."
+  - "Unit test: test_report_parser.py — given a well-formed report string, assert all six sections are parsed (Vulnerability, Location, Description, How to Replicate, Proposed Fix, Severity)."
+  - "Unit test: test_report_parser.py — given 'NO VULNERABILITIES DETECTED', assert parser returns a clean no-vuln result."
+
+qa_notes: |
+  Manual QA: invoke /ctf-vuln-hunter against a known-vulnerable C snippet (e.g. gets() call)
+  and verify all six report sections are populated. Check that defaults work when Enter is
+  pressed for output/log paths.
+
+out_of_scope:
+  - "Multi-vulnerability ranking beyond selecting the single most critical finding."
+  - "Automatic patch application — the proposed fix is informational only."
+  - "Network-based scanning or dynamic analysis; this skill performs static source analysis only."
+  - "GUI or web frontend."
+
+implementation_skill: null
+
+eval_plan:
+  scenarios: []
+  metrics: []
+
+technical_notes: |
+  The runner (src/runner.py) wraps subprocess.run around the claude CLI.
+  The report parser (src/report_parser.py) extracts the six structured sections.
+  Tests live in tests/ and use pytest with unittest.mock for subprocess isolation.
+  The .claude/commands/ctf-vuln-hunter.md file is the skill entry point read by Claude Code.
+
+linked_issues: []
+linked_prs: []

@@ -1,8 +1,8 @@
-# {{PROJECT_NAME}}
+# ctf-vuln-hunter
 
-{{BADGES}}
+![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white) ![OpenSpec](https://img.shields.io/badge/OpenSpec-enforced-blueviolet) ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-{{PROJECT_DESCRIPTION}}
+A Claude Code CLI skill that runs an autonomous vulnerability scan and produces a structured report
 
 ---
 
