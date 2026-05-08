@@ -2,271 +2,144 @@
 
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white) ![OpenSpec](https://img.shields.io/badge/OpenSpec-enforced-blueviolet) ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-A Claude Code CLI skill that runs an autonomous vulnerability scan and produces a structured report
-
----
-
-## What is OpenSpec?
-
-OpenSpec is a spec-driven development framework built into this repo. Every feature or bugfix starts with a spec file — no spec, no code. Specs define acceptance criteria, test plans, and the domain skill to use during implementation.
-
-**Layers of enforcement:**
-
-| Layer | When | What |
-|---|---|---|
-| Git hook (local) | `git commit` | Blocks commits with source changes but no spec |
-| Pre-commit framework (optional) | `git commit` | Runs gitleaks, yamllint, markdownlint, shellcheck |
-| CI — deterministic | Every PR | Validates spec fields, status, test_plan, and runs the test suite |
-| CI — agentic | Every PR | AI checks if the implementation actually satisfies the spec |
-| CI — security | Every PR | CodeQL SAST, gitleaks secret scan, dependency review |
-| CI — supply chain | Every release | CycloneDX SBOM generation |
+A Claude Code skill that runs an autonomous vulnerability scan on source code and produces a structured security report — covering the finding, its location, a replication PoC, a corrected patch, and a severity rating.
 
 ---
 
 ## How it works
 
 ```mermaid
-flowchart TD
-    A([New feature or bugfix]) --> B{Spec exists?}
-    B -- No --> C["/openspec-scaffold\nor: gh openspec scaffold"]
-    C --> D[Fill in acceptance_criteria\nand test_plan]
-    D --> E{status = review?}
-    B -- Yes --> E
-    E -- draft --> D
-    E -- review/approved --> F["/openspec-implement\ninvokes domain skill if set"]
-    F --> G[Write tests per test_plan]
-    G --> H([Open PR])
-    H --> I[spec-check.yml\ndeterministic gate]
-    H --> J[spec-ai-review.yml\nagentic alignment check]
-    I --> K{All checks pass?}
-    J --> K
-    K -- No --> F
-    K -- Yes --> L([Merge])
+flowchart LR
+    A([/ctf-vuln-hunter]) --> B[Collect source / output / log paths]
+    B --> C[Run claude CLI with senior-researcher prompt]
+    C --> D{Report file non-empty?}
+    D -- Yes --> E([Display structured report])
+    D -- No --> F([Surface log tail + error reason])
 ```
 
 ---
 
-## Quick start
+## Installation
 
-### 1. Configure this repo
-
-Open it in [Claude Code](https://claude.ai/code) — it detects the unconfigured state and interviews you automatically.
-
-Or configure manually:
+The skill ships as a Claude Code command. Drop it into your project's `.claude/commands/` directory:
 
 ```bash
-# Edit the five required fields
-vi .openspec/config.yaml
-
-# Install git hooks
-bash setup.sh
+cp .claude/commands/ctf-vuln-hunter.md /your-project/.claude/commands/
 ```
 
-### 2. Set your personal defaults (optional)
+Or clone this repo and open it in Claude Code — the skill is available immediately in any session.
 
-Fill in `.openspec/defaults.yaml` once — onboarding will skip questions you've already answered:
-
-```yaml
-owner: "your-github-org"
-team: "your-team"
-test_command: "npm test"
-default_implementation_skill: "frontend-pro"  # or backend-pro, devops-pro, etc.
-```
-
-### 3. Create your first spec
+**Requirement:** Claude Code CLI must be installed:
 
 ```bash
-gh openspec scaffold "my first feature"
-# or in Claude Code:
-/openspec-scaffold my first feature
+npm install -g @anthropic-ai/claude-code
 ```
 
-### 4. Implement with the right domain skill
+---
+
+## Usage
+
+Trigger the skill with any of these phrases in a Claude Code session:
+
+- `/ctf-vuln-hunter`
+- "scan for vulnerabilities in ..."
+- "audit this code"
+- "CTF analysis"
+- "find bugs in ..."
+- "exploit analysis"
+
+Claude will ask for three paths (defaults shown):
+
+| Input | Default |
+|---|---|
+| Source path | *(required)* |
+| Output path | `/tmp/vuln_report.txt` |
+| Log path | `/tmp/claude_vuln.log` |
+
+If you paste code inline or upload a file, it is saved to `/tmp/target_src/` automatically.
+
+---
+
+## Report format
+
+Every scan produces a report with exactly six sections:
+
+```
+VULNERABILITY REPORT
+====================
+
+## Vulnerability
+[Name and CWE ID]
+
+## Location
+[File, function, line number(s)]
+
+## Description
+[Technical explanation of the flaw and its impact]
+
+## How to Replicate
+[Step-by-step PoC or minimal payload]
+
+## Proposed Fix
+[Corrected code snippet with explanation]
+
+## Severity
+[CRITICAL / HIGH / MEDIUM / LOW — with justification]
+```
+
+If no vulnerability is found the report contains `NO VULNERABILITIES DETECTED`.
+
+---
+
+## Python API
+
+The scanner logic is also available as a Python module:
+
+```python
+from src.runner import run_scan, InstallationError, NonZeroExitError
+from src.report_parser import parse
+
+try:
+    raw = run_scan(
+        source_path="/path/to/target.c",
+        output_path="/tmp/report.txt",
+        log_path="/tmp/scan.log",
+    )
+    report = parse(raw)
+    print(report.severity, report.vulnerability)
+except InstallationError as e:
+    print(e)   # claude CLI not found
+except NonZeroExitError as e:
+    print(e)   # includes last 20 log lines
+```
+
+---
+
+## Running tests
 
 ```bash
-# In Claude Code — reads the spec, invokes implementation_skill if set
-/openspec-implement my-first-feature
-```
-
-### 5. Validate before pushing
-
-```bash
-gh openspec check           # validate all specs
-gh openspec check --strict  # treat warnings as errors
-gh openspec check --pr 42   # check a specific PR
+pytest
 ```
 
 ---
 
-## Claude Code skills
+## Error handling
 
-Three project skills are available in any Claude Code session:
-
-| Skill | What it does |
+| Situation | Behaviour |
 |---|---|
-| `/openspec-scaffold [feature]` | Guided spec creation — reads defaults, scaffolds file, validates required fields |
-| `/openspec-implement [slug]` | Reads spec, checks status, invokes domain skill, implements + writes tests |
-| `/openspec-check` | Validates spec coverage for current staged changes |
+| `claude` CLI not on PATH | `InstallationError` — tells you to run `npm install -g @anthropic-ai/claude-code` |
+| Source path does not exist | User is prompted to confirm the path before the scan runs |
+| Report file empty after scan | Last 20 lines of the log file are returned |
+| Non-zero exit code | `NonZeroExitError` with exit code and last 20 log lines |
 
 ---
 
-## Project structure
+## Security note
 
-```
-.openspec/
-├── config.yaml              # Project configuration and enforcement settings
-├── defaults.yaml            # Personal/team defaults (fill in once)
-├── onboarding.yaml          # Questions Claude Code asks during first-time setup
-├── specs/                   # Active spec files (one per feature/bugfix)
-│   └── example-feature.spec.yaml
-└── templates/
-    ├── feature.spec.yaml    # Includes optional eval_plan for AI-backed features
-    └── bugfix.spec.yaml
-
-.harness/                    # Eval harness — proves specs under controlled conditions
-├── scenarios/               # Declarative eval scenarios (agent tasks, prompt runs)
-│   └── example.scenario.yaml
-├── evaluators/              # Rubrics and scripts that score scenario runs
-├── mocks/                   # Mock tools, APIs, and data sources
-└── traces/                  # Captured execution traces (gitignored by default)
-
-.github/
-├── workflows/
-│   ├── spec-check.yml           # Deterministic CI gate + test runner
-│   ├── spec-ai-review.yml       # Agentic semantic review
-│   ├── spec-bootstrap.yml       # First-push setup reminder
-│   ├── repo-init.yml            # Creates `main` branch on new repos from template
-│   ├── codeql.yml               # Static analysis (SAST)
-│   ├── secret-scan.yml          # Gitleaks secret scanning
-│   ├── dependency-review.yml    # Vulnerable / disallowed-license deps
-│   ├── sbom.yml                 # CycloneDX SBOM on release
-│   ├── labeler.yml              # Path-based PR labels
-│   ├── release-drafter.yml      # Auto-drafted release notes
-│   └── stale.yml                # Stale issue/PR bot
-├── ISSUE_TEMPLATE/
-│   ├── bug_report.yml
-│   ├── feature_request.yml
-│   ├── spec_question.yml
-│   └── config.yml
-├── agents/
-│   └── spec-review.md           # AI agent goal file
-├── CODEOWNERS                   # Ownership matrix
-├── FUNDING.yml                  # Sponsor links
-├── AGENTS.md                    # Instructions for AI agents
-├── copilot-instructions.md      # GitHub Copilot instructions
-├── dependabot.yml               # Weekly dependency updates
-├── labeler.yml                  # Rules for path-based labelling
-├── pull_request_template.md     # Structured PR template
-└── release-drafter.yml          # Release-notes grouping config
-
-.claude/
-├── commands/
-│   ├── openspec-scaffold.md
-│   ├── openspec-implement.md
-│   └── openspec-check.md
-├── hooks/
-│   └── require-spec-on-commit.sh
-└── settings.json
-
-docs/
-├── adr/                         # Architecture Decision Records
-│   └── 0001-record-architecture-decisions.md
-└── BRANCH_PROTECTION.md         # Recommended ruleset configuration
-
-Governance (repo root):
-├── SECURITY.md                  # Vulnerability disclosure policy
-├── CONTRIBUTING.md              # Contribution guide (spec-first)
-├── CODE_OF_CONDUCT.md           # Contributor Covenant v2.1
-├── SUPPORT.md                   # Support channels
-├── CHANGELOG.md                 # Keep-a-Changelog
-├── .gitignore                   # Multi-language defaults
-├── .gitattributes               # Line endings + linguist hints
-├── .editorconfig                # Editor formatting rules
-├── .pre-commit-config.yaml      # Optional pre-commit hooks
-└── .yamllint                    # YAML lint rules
-```
-
-## Governance
-
-| File | Purpose |
-|---|---|
-| [SECURITY.md](SECURITY.md) | Report a vulnerability privately |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — spec-first |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant v2.1 |
-| [SUPPORT.md](SUPPORT.md) | Where to get help |
-| [CHANGELOG.md](CHANGELOG.md) | Release history |
-| [.github/CODEOWNERS](.github/CODEOWNERS) | Ownership matrix |
-| [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md) | Recommended GitHub rulesets |
+`--dangerously-skip-permissions` is required so the CLI can read source files and write the report without interactive prompts. Only point this skill at code you own or are authorized to test.
 
 ---
 
-## Spec file format
+**Developer:** Eduardo Arana · [ko-fi](https://ko-fi.com/H2H51MPWG)
 
-See `.openspec/specs/example-feature.spec.yaml` for a fully filled-in reference.
-
-Required fields: `title`, `description`, `acceptance_criteria`, `test_plan`, `status`
-
-Status lifecycle: `draft` → `review` → `approved`
-
-> Code can only be written when status is `review` or `approved`.
-
----
-
-## OpenSpec vs Harness
-
-OpenSpec defines **what should be true.**
-Tests and harnesses prove **whether it is true.**
-
-For normal software, this means unit, integration, and end-to-end tests — captured in each spec's `test_plan`.
-
-For AI systems, verification often requires more:
-
-| Concern | Tool |
-|---|---|
-| Functional correctness | Unit / integration tests (`test_plan`) |
-| Agent task success | Eval scenarios (`.harness/scenarios/`) |
-| Grounding and citation accuracy | Evaluators (`.harness/evaluators/`) |
-| Tool use correctness | Mocked tool runs (`.harness/mocks/`) |
-| Latency and cost budgets | Scenario `thresholds` + `metrics` |
-| Safety and refusal behavior | Scenario `expected` + evaluator rubrics |
-| Reproducible regression baselines | Captured traces (`.harness/traces/`) |
-
-When a spec involves an AI-backed component, add an `eval_plan` block — it links the spec to the harness scenarios that prove it:
-
-```yaml
-eval_plan:
-  scenarios:
-    - ".harness/scenarios/my-agent-task.scenario.yaml"
-  metrics:
-    - task_success
-    - groundedness
-    - tool_accuracy
-    - refusal_accuracy
-```
-
-The spec says *what* must be validated. The harness says *how* that validation is executed.
-
----
-
-## Coding Guidelines
-
-This project follows the [Karpathy-Inspired Coding Guidelines](https://github.com/forrestchang/andrej-karpathy-skills) — four principles derived from [Andrej Karpathy's observations](https://x.com/karpathy/status/2015883857489522876) on common LLM coding pitfalls:
-
-| Principle | What it addresses |
-|---|---|
-| **Think Before Coding** | Wrong assumptions, hidden confusion, missing tradeoffs |
-| **Simplicity First** | Overcomplication, bloated abstractions |
-| **Surgical Changes** | Orthogonal edits, touching code you shouldn't |
-| **Goal-Driven Execution** | Leverage through tests-first, verifiable success criteria |
-
-These guidelines are integrated into [`CLAUDE.md`](CLAUDE.md) and work alongside OpenSpec — Principle 4 (Goal-Driven Execution) is structurally enforced through spec `acceptance_criteria` and `test_plan` fields.
-
----
-
-**Developer:** Eduardo Arana
-
-**License:** [MIT](LICENSE)
-
----
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/H2H51MPWG)
+**License:** [MIT](LICENSE) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
