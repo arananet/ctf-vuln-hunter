@@ -1,6 +1,6 @@
 # Support
 
-Thanks for using `{{PROJECT_NAME}}`. Here's where to go for help.
+Thanks for using `ctf-vuln-hunter`. Here's where to go for help.
 
 ## Quick Triage
 
@@ -36,8 +36,8 @@ This project is maintained on a best-effort basis. Typical response windows:
 
 ## Commercial Support
 
-Not currently offered. For project-specific consulting, contact
-`{{SECURITY_CONTACT}}`.
+Not currently offered. For project-specific consulting, open a
+[GitHub Discussion](https://github.com/arananet/ctf-vuln-hunter/discussions).
 
 ## Funding
 
